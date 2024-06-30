@@ -32,20 +32,21 @@ sigmoid function to normalize into 0-1
 last layer = all outputs 
     for example, for number reckognition it would be 10
 
+only supports middle layers of a constant size
+
 */
 
 
 /* TODO: 
 all of learning
-finish the execution step
-ensure x-dimmensional vectors can be serialized
-file loading / deserializing
+flexibility of the mid layers varies in support
 threads / gpu ??
 */
 
 use std::fs::File;
 use std::io::{Write, Read};
 use std::io;
+use std::ops::BitAnd;
 use std::process::Output;
 use rand::{rngs::ThreadRng, Error, Rng};
 use std::f32::consts::E;
@@ -54,9 +55,9 @@ use bytes::{Bytes, BytesMut, Buf, BufMut};
 fn main() {
     println!("neural net starting");
 
-    //let mut n1: Network = Network::create_network(784,2,16, 10);
+    //let mut n1: Network = Network::new(784,2,16, 10);
     //n1.save("./1.bin");
-    let mut n1: Network = Network::import_network("./1.bin");
+    let mut n1: Network = Network::import("./1.bin");
 
     let input: Vec<f32> = (0..=784).map(|x| x as f32).collect();
 
@@ -75,10 +76,11 @@ pub struct Network {
     output_layer_weights: Vec<Vec<f32>>, // 16, 10
     output: Vec<f32>,
     output_size: usize,
+    biases: Vec<Vec<f32>>,
 }
 
 impl Network {
-    pub fn create_network(input_size: usize, hidden_layer_count: usize, hidden_layer_size: usize, output_size: usize) -> Self {
+    pub fn new(input_size: usize, hidden_layer_count: usize, hidden_layer_size: usize, output_size: usize) -> Self {
         let mut rng: ThreadRng = rand::thread_rng();
 
         // maps inputs -> hidden layer 1 with 784*16 weights
@@ -93,6 +95,17 @@ impl Network {
 
         let output: Vec<f32> = vec![0.0; output_size];
 
+        
+        let mut biases: Vec<Vec<f32>> = vec![Vec::new(); 2+(hidden_layer_count-1)];
+        for i in 0..hidden_layer_count {
+            biases[i] = (0..hidden_layer_size).map(|_| rng.gen_range(-10.0..10.0)).collect();
+        }
+
+        //this is really annoying
+        let length = biases.len()-1;
+        biases[length] = (0..hidden_layer_size).map(|_| rng.gen_range(-10.0..10.0)).collect();;
+
+
         Self {
             input_size,
             input_weights,
@@ -103,19 +116,19 @@ impl Network {
             output,
             output_size,
             output_layer_weights,
+            biases,
         }
     }
 
     // imports a saved network from a file
-    pub fn import_network(filename: &str) -> Self {
+    pub fn import(filename: &str) -> Self {
 
         let mut file: File = File::open(filename).expect(std::format!("file {} failed to open", filename).as_str());
 
         let mut sizes = [0; 1 + 7*4];
-
         file.read_exact(&mut sizes);
-        let mut buff: BytesMut = BytesMut::new();
 
+        let mut buff: BytesMut = BytesMut::new();
         buff.put(&sizes[..]);
 
         let version: u8 = buff.get_u8();
@@ -135,14 +148,17 @@ impl Network {
         let mut hidden_layer_weights: Vec<Vec<Vec<f32>>> = vec![vec![vec![0.0; hidden_layer_size]; hidden_layer_size]; hidden_layer_count];
         let mut output_layer_weights: Vec<Vec<f32>> = vec![vec![0.0; output_size]; hidden_layer_size];
         let output: Vec<f32> = vec![0.0; output_size];
+        let mut biases: Vec<Vec<f32>> = vec![Vec::new(); 2+(hidden_layer_count-1)];
 
         let input_weight_size: usize = input_size*hidden_layer_size;
         let hidden_layer_weight_size: usize = (hidden_layer_count-1)*hidden_layer_size*hidden_layer_size;
         let output_weight_size: usize = hidden_layer_size*output_size;
-        let capacity: usize = ( input_weight_size +  hidden_layer_weight_size + output_weight_size) * 4;
+        let biases_size: usize = (hidden_layer_count)*hidden_layer_size + output_size;
+        let capacity: usize = ( input_weight_size +  hidden_layer_weight_size + output_weight_size + biases_size) * 4;
 
         let mut data = vec![0; capacity];
         file.read_exact(&mut data);
+
         let mut buff: BytesMut = BytesMut::new();
         buff.put(&data[..]);
 
@@ -151,18 +167,30 @@ impl Network {
                 input_weights[i][j] = buff.get_f32_le();
             }
         }
-
-        for i in 0..hidden_layer_size {
+        for i in 0..(hidden_layer_count-1) {
             for j in 0..hidden_layer_size {
-               hidden_layer_weights[0][i][j] = buff.get_f32_le();
+                for k in 0..hidden_layer_size {
+                hidden_layer_weights[i][j][k] = buff.get_f32_le();
+                }
             }
-        }
+        }   
 
 
         for i in 0..hidden_layer_size {
             for j in 0..output_size {
                output_layer_weights[i][j] = buff.get_f32_le();
             }
+        }
+
+        
+        for i in 0..hidden_layer_count {
+            for j in 0..hidden_layer_size{
+                biases[i].push(buff.get_f32_le());
+            }
+        }
+
+        for i in 0..output_size {
+            biases[hidden_layer_count].push(buff.get_f32_le());
         }
         
 
@@ -176,6 +204,7 @@ impl Network {
             output,
             output_size,
             output_layer_weights,
+            biases
         }
     }
     
@@ -243,6 +272,7 @@ impl Network {
     x bytes: input_weights
     x bytes: hidden_weights
     x bytes: output_weights
+    x bytes: biases
 
     multiply * 4 for f32
      */
@@ -250,7 +280,8 @@ impl Network {
         let input_weight_size: usize = self.input_size*self.hidden_layer_size;
         let hidden_layer_weight_size: usize = (self.hidden_layer_count-1)*self.hidden_layer_size*self.hidden_layer_size;
         let output_weight_size: usize = self.hidden_layer_size*self.output_size;
-        let capacity: usize = 1 + 7*4 + ( input_weight_size +  hidden_layer_weight_size + output_weight_size) * 4;
+        let biases_size: usize = (self.hidden_layer_count)*self.hidden_layer_size + self.output_size;
+        let capacity: usize = 1 + 7*4 + ( input_weight_size +  hidden_layer_weight_size + output_weight_size + biases_size) * 4;
 
         let mut output: BytesMut = BytesMut::with_capacity(capacity);
 
@@ -270,16 +301,23 @@ impl Network {
             }
         }
 
-        for i in 0..self.hidden_layer_size {
+        for i in 0..(self.hidden_layer_count-1) {
             for j in 0..self.hidden_layer_size {
-                output.put_f32_le(self.hidden_layer_weights[0][i][j]);
+                for k in 0..self.hidden_layer_size {
+                    output.put_f32_le(self.hidden_layer_weights[i][j][k]);
+                }
             }
-        }
-
+        } 
 
         for i in 0..self.hidden_layer_size {
             for j in 0..self.output_size {
                 output.put_f32_le(self.output_layer_weights[i][j]);
+            }
+        }
+
+        for i in 0..(2+(self.hidden_layer_count-1)) {
+            for j in 0..self.biases[i].len(){
+                output.put_f32_le(self.biases[i][j]); 
             }
         }
 
