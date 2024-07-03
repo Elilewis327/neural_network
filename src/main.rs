@@ -38,6 +38,7 @@ only supports middle layers of a constant size
 
 
 /* TODO: 
+this code sucks but its fine as a learning excercise and i dont wanna rewrite it all
 all of learning
 flexibility of the mid layers varies in support
 threads / gpu ??
@@ -220,6 +221,7 @@ impl Network {
         1.0 / ( 1.0 + E.powf( -1.0 * number))
     }
 
+    // break into function
     pub fn exec(&mut self, input: &Vec<f32>) -> &Vec<f32> {
 
         // input -> layer 1
